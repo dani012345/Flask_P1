@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta
+      name="description"
+      content="Ejemplo Flask de CRUD y carrito con reserva temporal."
+    >
+    <title>{% block titulo %}Reserva temporal{% endblock %}</title>
+    <link
+      rel="stylesheet"
+      href="{{ url_for('static', filename='css/estilos.css') }}"
+    >
+  </head>
+  <body>
+    <header class="encabezado">
+      <div class="contenedor encabezado-contenido">
+        <div>
+          <p class="etiqueta clara">Aplicaciones Web con Flask</p>
+          <h1>Carrito con reserva temporal</h1>
+          <p class="subtitulo">
+            CRUD de boletos conectado con MongoDB Atlas
+          </p>
+        </div>
+        <div class="estado-api" id="estadoApi">Comprobando API...</div>
+      </div>
+    </header>
+
+    {% block contenido %}{% endblock %}
+
+    <footer>
+      Ejemplo didactico - CBTIS - Python, Flask y MongoDB Atlas
+    </footer>
+
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

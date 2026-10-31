@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+
+{% block titulo %}Boletos - Reserva temporal{% endblock %}
+
+{% block contenido %}
+<main
+  class="contenedor principal"
+  id="aplicacion"
+  data-reserva-segundos="{{ reserva_segundos }}"
+>
+  <section class="panel introduccion">
+    <div>
+      <p class="etiqueta">Idea de la practica</p>
+      <h2>Disponible - Reservado - Comprado</h2>
+      <p class="sin-margen">
+        Al agregar un boleto al carrito se aparta durante
+        <strong>{{ reserva_segundos }} segundos</strong>. Otra persona lo vera
+        como reservado y no podra seleccionarlo.
+      </p>
+    </div>
+    <button class="boton secundario" id="btnSemilla" type="button">
+      Cargar 6 boletos de ejemplo
+    </button>
+  </section>
+
+  <section class="panel identidad">
+    <div>
+      <p class="etiqueta">Usuario de esta ventana</p>
+      <h2>Identidad para la demostracion</h2>
+      <p class="ayuda sin-margen">
+        Abra otra ventana de incognito y escriba otro nombre para simular un
+        segundo comprador.
+      </p>
+    </div>
+    <div class="identidad-controles">
+      <label>
+        Nombre del comprador
+        <input
+          id="clienteNombre"
+          type="text"
+          maxlength="40"
+          value="Comprador 1"
+        >
+      </label>
+      <div class="identificador">
+        ID: <strong id="clienteIdCorto"></strong>
+      </div>
+    </div>
+  </section>
+
+  <section class="resumen" aria-label="Resumen de boletos">
+    <article class="tarjeta-resumen disponible">
+      <span>Disponibles</span>
+      <strong id="totalDisponibles">0</strong>
+    </article>
+    <article class="tarjeta-resumen reservado">
+      <span>Reservados</span>
+      <strong id="totalReservados">0</strong>
+    </article>
+    <article class="tarjeta-resumen comprado">
+      <span>Comprados</span>
+      <strong id="totalComprados">0</strong>
+    </article>
+    <article class="tarjeta-resumen total">
+      <span>Total</span>
+      <strong id="totalBoletos">0</strong>
+    </article>
+  </section>
+
+  <div id="mensaje" class="mensaje oculto" role="status"></div>
+
+  <section class="dos-columnas">
+    <article class="panel">
+      <div class="titulo-panel">
+        <div>
+          <p class="etiqueta">CRUD</p>
+          <h2 id="tituloFormulario">Crear boleto</h2>
+        </div>
+        <button
+          id="btnCancelarEdicion"
+          class="boton enlace oculto"
+          type="button"
+        >
+          Cancelar edicion
+        </button>
+      </div>
+
+      <form id="formBoleto" class="formulario">
+        <input id="boletoId" type="hidden">
+
+        <label>
+          Evento
+          <input id="evento" type="text" maxlength="80" required>
+        </label>
+
+        <div class="campos-dobles">
+          <label>
+            Zona
+            <input id="zona" type="text" maxlength="40" required>
+          </label>
+          <label>
+            Asiento
+            <input id="asiento" type="text" maxlength="20" required>
+          </label>
+        </div>
+
+        <label>
+          Precio
+          <input id="precio" type="number" min="0" step="0.01" required>
+        </label>
+
+        <button class="boton primario ancho" type="submit">
+          <span id="textoGuardar">Guardar boleto</span>
+        </button>
+      </form>
+    </article>
+
+    <article class="panel carrito">
+      <div class="titulo-panel">
+        <div>
+          <p class="etiqueta naranja">Mi carrito</p>
+          <h2>Reservas de esta ventana</h2>
+        </div>
+      </div>
+      <div id="listaCarrito" class="lista-carrito"></div>
+    </article>
+  </section>
+
+  <section class="panel seccion-lista">
+    <div class="titulo-panel lista-encabezado">
+      <div>
+        <p class="etiqueta">Consulta en tiempo real</p>
+        <h2>Boletos registrados</h2>
+      </div>
+      <div class="acciones-superiores">
+        <select id="filtroEstado" aria-label="Filtrar por estado">
+          <option value="todos">Todos los estados</option>
+          <option value="disponible">Disponibles</option>
+          <option value="reservado">Reservados</option>
+          <option value="comprado">Comprados</option>
+        </select>
+        <button class="boton secundario" id="btnActualizar" type="button">
+          Actualizar
+        </button>
+      </div>
+    </div>
+
+    <div class="tabla-contenedor">
+      <table>
+        <thead>
+          <tr>
+            <th>Evento</th>
+            <th>Zona</th>
+            <th>Asiento</th>
+            <th>Precio</th>
+            <th>Estado</th>
+            <th>Tiempo / propietario</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="tablaBoletos"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+{% endblock %}

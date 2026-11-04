@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
-
+from pymongo.results import UpdateResult
 from bson import ObjectId
 from bson.errors import InvalidId
 from dotenv import load_dotenv
@@ -19,14 +19,14 @@ RESERVA_SEGUNDOS = max(15, min(int(os.getenv("RESERVA_SEGUNDOS", "60")), 1800))
 
 cliente_mongo = None
 boletos = None
-
+reservas= None
 
 def ahora_utc():
     return datetime.now(timezone.utc)
 
 
 def obtener_coleccion():
-    global cliente_mongo, boletos
+    global cliente_mongo, boletos, reservas
 
     if not MONGO_URI:
         raise RuntimeError(
@@ -41,6 +41,11 @@ def obtener_coleccion():
         )
         base_datos = cliente_mongo[MONGO_DB]
         boletos = base_datos["boletos"]
+        
+        reservas = base_datos["reservas"]
+        reservas.create_index("reserva_id")
+        reservas.create_index([("estado", ASCENDING), ("vence_en", ASCENDING)])
+        
         boletos.create_index(
             [("evento", ASCENDING), ("asiento", ASCENDING)],
             unique=True,
@@ -137,22 +142,68 @@ def obtener_cliente(datos):
 
 def liberar_reservas_vencidas():
     coleccion = obtener_coleccion()
-    momento = ahora_utc()
 
-    return coleccion.update_many(
+    pendientes = list(reservas.find(
         {
-            "estado": "reservado",
-            "reserva_hasta": {"$lte": momento},
+            "estado": "activa",
+            "vence_en": {"$lte": ahora_utc()},
         },
-        {
-            "$set": {
-                "estado": "disponible",
-                "reservado_por": None,
-                "reservado_nombre": None,
-                "reserva_hasta": None,
-                "actualizado_en": momento,
-            }
-        },
+        {"_id": 1},
+    ))
+
+    liberadas = 0
+
+    with cliente_mongo.start_session() as sesion:
+        for pendiente in pendientes:
+
+            def liberar(sesion):
+                momento = ahora_utc()
+
+                reserva = reservas.find_one_and_update(
+                    {
+                        "_id": pendiente["_id"],
+                        "estado": "activa",
+                        "vence_en": {"$lte": momento},
+                    },
+                    {
+                        "$set": {
+                            "estado": "vencida",
+                            "cerrada_en": momento,
+                        }
+                    },
+                    return_document=ReturnDocument.AFTER,
+                    session=sesion,
+                )
+
+                if reserva is None:
+                    return 0
+
+                resultado = coleccion.update_one(
+                    {
+                        "_id": reserva["recurso_id"],
+                        "estado": "reservado",
+                        "reservado_por": reserva["reserva_id"],
+                        "reserva_hasta": reserva["vence_en"],
+                    },
+                    {
+                        "$set": {
+                            "estado": "disponible",
+                            "reservado_por": None,
+                            "reservado_nombre": None,
+                            "reserva_hasta": None,
+                            "actualizado_en": momento,
+                        }
+                    },
+                    session=sesion,
+                )
+
+                return resultado.modified_count
+
+            liberadas += sesion.with_transaction(liberar)
+
+    return UpdateResult(
+        {"n": liberadas, "nModified": liberadas, "ok": 1},
+        acknowledged=True,
     )
 
 
@@ -306,144 +357,260 @@ def eliminar_boleto(boleto_id):
 
     return jsonify({"mensaje": "Boleto eliminado correctamente."})
 
-
 @app.post("/api/boletos/<boleto_id>/reservar")
 def reservar_boleto(boleto_id):
     coleccion = obtener_coleccion()
     datos = request.get_json(silent=True) or {}
+
     cliente_id, cliente_nombre = obtener_cliente(datos)
+    identificador = obtener_object_id(boleto_id)
     momento = ahora_utc()
     reserva_hasta = momento + timedelta(seconds=RESERVA_SEGUNDOS)
 
-    documento = coleccion.find_one_and_update(
-        {
-            "_id": obtener_object_id(boleto_id),
-            "$or": [
-                {"estado": "disponible"},
+    with cliente_mongo.start_session() as sesion:
+
+        def guardar_reserva(sesion):
+            documento = coleccion.find_one_and_update(
                 {
-                    "estado": "reservado",
-                    "reserva_hasta": {"$lte": momento},
+                    "_id": identificador,
+                    "$or": [
+                        {"estado": "disponible"},
+                        {
+                            "estado": "reservado",
+                            "reserva_hasta": {"$lte": momento},
+                        },
+                    ],
                 },
-            ],
-        },
-        {
-            "$set": {
-                "estado": "reservado",
-                "reservado_por": cliente_id,
-                "reservado_nombre": cliente_nombre,
-                "reserva_hasta": reserva_hasta,
-                "comprado_por": None,
-                "comprado_nombre": None,
-                "comprado_en": None,
-                "actualizado_en": momento,
-            }
-        },
-        return_document=ReturnDocument.AFTER,
-    )
+                {
+                    "$set": {
+                        "estado": "reservado",
+                        "reservado_por": cliente_id,
+                        "reservado_nombre": cliente_nombre,
+                        "reserva_hasta": reserva_hasta,
+                        "comprado_por": None,
+                        "comprado_nombre": None,
+                        "comprado_en": None,
+                        "actualizado_en": momento,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+                session=sesion,
+            )
 
-    if not documento:
-        return jsonify(
-            {
-                "mensaje": (
-                    "El boleto acaba de ser reservado o comprado por otra persona."
-                )
-            }
-        ), 409
+            if documento is None:
+                return None
 
-    return jsonify(
-        {
-            "mensaje": f"Boleto reservado durante {RESERVA_SEGUNDOS} segundos.",
-            "boleto": serializar_boleto(documento),
-        }
-    )
+            # Cierra apartados anteriores que ya vencieron.
+            reservas.update_many(
+                {
+                    "recurso_id": identificador,
+                    "estado": "activa",
+                    "vence_en": {"$lte": momento},
+                },
+                {"$set": {"estado": "vencida"}},
+                session=sesion,
+            )
+
+            reservas.insert_one(
+                {
+                    "reserva_id": cliente_id,
+                    "recurso_id": identificador,
+                    "cantidad": 1,
+                    "estado": "activa",
+                    "creada_en": momento,
+                    "vence_en": reserva_hasta,
+                },
+                session=sesion,
+            )
+
+            return documento
+
+        documento = sesion.with_transaction(guardar_reserva)
+
+    if documento is None:
+        return jsonify({
+            "mensaje": "El boleto ya fue reservado o comprado."
+        }), 409
+
+    return jsonify({
+        "mensaje": f"Boleto reservado durante {RESERVA_SEGUNDOS} segundos.",
+        "boleto": serializar_boleto(documento),
+    })
 
 
 @app.post("/api/boletos/<boleto_id>/cancelar")
 def cancelar_reserva(boleto_id):
     coleccion = obtener_coleccion()
     datos = request.get_json(silent=True) or {}
-    cliente_id = limpiar_texto(datos.get("cliente_id"))
 
+    cliente_id = limpiar_texto(datos.get("cliente_id"))
     if not cliente_id:
         raise ValueError("Falta identificar al comprador.")
 
-    documento = coleccion.find_one_and_update(
-        {
-            "_id": obtener_object_id(boleto_id),
-            "estado": "reservado",
-            "reservado_por": cliente_id,
-        },
-        {
-            "$set": {
-                "estado": "disponible",
-                "reservado_por": None,
-                "reservado_nombre": None,
-                "reserva_hasta": None,
-                "actualizado_en": ahora_utc(),
-            }
-        },
-        return_document=ReturnDocument.AFTER,
-    )
+    identificador = obtener_object_id(boleto_id)
 
-    if not documento:
-        return jsonify(
-            {"mensaje": "La reserva ya vencio o pertenece a otro usuario."}
-        ), 409
+    with cliente_mongo.start_session() as sesion:
 
-    return jsonify(
-        {
-            "mensaje": "Reserva cancelada. El boleto vuelve a estar disponible.",
-            "boleto": serializar_boleto(documento),
-        }
-    )
+        def cancelar(sesion):
+            momento = ahora_utc()
+
+            reserva = reservas.find_one_and_update(
+                {
+                    "recurso_id": identificador,
+                    "reserva_id": cliente_id,
+                    "estado": "activa",
+                },
+                {
+                    "$set": {
+                        "estado": "cancelada",
+                        "cerrada_en": momento,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+                session=sesion,
+            )
+
+            if reserva is None:
+                return None
+
+            documento = coleccion.find_one_and_update(
+                {
+                    "_id": identificador,
+                    "estado": "reservado",
+                    "reservado_por": cliente_id,
+                },
+                {
+                    "$set": {
+                        "estado": "disponible",
+                        "reservado_por": None,
+                        "reservado_nombre": None,
+                        "reserva_hasta": None,
+                        "actualizado_en": momento,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+                session=sesion,
+            )
+
+            if documento is None:
+                # El error revierte también el cierre de la reserva.
+                raise ValueError(
+                    "El boleto ya no corresponde a esta reserva."
+                )
+
+            return documento
+
+        documento = sesion.with_transaction(cancelar)
+
+    if documento is None:
+        return jsonify({
+            "mensaje": "No tienes una reserva activa para este boleto."
+        }), 409
+
+    return jsonify({
+        "mensaje": "Reserva cancelada. El boleto vuelve a estar disponible.",
+        "boleto": serializar_boleto(documento),
+    })
 
 
 @app.post("/api/boletos/<boleto_id>/confirmar")
 def confirmar_compra(boleto_id):
     coleccion = obtener_coleccion()
     datos = request.get_json(silent=True) or {}
-    cliente_id, cliente_nombre = obtener_cliente(datos)
-    momento = ahora_utc()
 
-    documento = coleccion.find_one_and_update(
-        {
-            "_id": obtener_object_id(boleto_id),
-            "estado": "reservado",
-            "reservado_por": cliente_id,
-            "reserva_hasta": {"$gt": momento},
-        },
-        {
-            "$set": {
-                "estado": "comprado",
-                "comprado_por": cliente_id,
-                "comprado_nombre": cliente_nombre,
-                "comprado_en": momento,
-                "reservado_por": None,
-                "reservado_nombre": None,
-                "reserva_hasta": None,
-                "actualizado_en": momento,
-            }
-        },
-        return_document=ReturnDocument.AFTER,
-    )
+    cliente_id, clien
+    te_nombre = obtener_cliente(datos)
+    identificador = obtener_object_id(boleto_id)
 
-    if not documento:
-        liberar_reservas_vencidas()
-        return jsonify(
-            {
-                "mensaje": (
-                    "No fue posible confirmar: la reserva vencio o pertenece a otro usuario."
+    with cliente_mongo.start_session() as sesion:
+
+        def confirmar(sesion):
+            momento = ahora_utc()
+
+            reserva = reservas.find_one_and_update(
+                {
+                    "recurso_id": identificador,
+                    "reserva_id": cliente_id,
+                    "estado": "activa",
+                    "vence_en": {"$gt": momento},
+                },
+                {
+                    "$set": {
+                        "estado": "confirmada",
+                        "cerrada_en": momento,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+                session=sesion,
+            )
+
+            if reserva is None:
+                return None
+
+            documento = coleccion.find_one_and_update(
+                {
+                    "_id": identificador,
+                    "estado": "reservado",
+                    "reservado_por": cliente_id,
+                    "reserva_hasta": reserva["vence_en"],
+                    "$expr": {
+                        "$gt": ["$reserva_hasta", momento]
+                    },
+                },
+                {
+                    "$set": {
+                        "estado": "comprado",
+                        "comprado_por": cliente_id,
+                        "comprado_nombre": cliente_nombre,
+                        "comprado_en": momento,
+                        "reservado_por": None,
+                        "reservado_nombre": None,
+                        "reserva_hasta": None,
+                        "actualizado_en": momento,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+                session=sesion,
+            )
+
+            if documento is None:
+                raise ValueError(
+                    "El boleto ya no corresponde a esta reserva."
                 )
-            }
-        ), 409
 
-    return jsonify(
-        {
-            "mensaje": "Compra confirmada correctamente.",
-            "boleto": serializar_boleto(documento),
-        }
-    )
+            # Registro final de la compra.
+            coleccion.database["compras"].insert_one(
+                {
+                    "reserva_documento_id": reserva["_id"],
+                    "reserva_id": cliente_id,
+                    "recurso_id": identificador,
+                    "cliente_nombre": cliente_nombre,
+                    "cantidad": 1,
+                    "precio": documento["precio"],
+                    "estado": "confirmada",
+                    "creada_en": momento,
+                },
+                session=sesion,
+            )
 
+            return documento
+
+        documento = sesion.with_transaction(confirmar)
+
+    if documento is None:
+        liberar_reservas_vencidas()
+
+        return jsonify({
+            "mensaje": (
+                "La reserva venció, ya fue cerrada "
+                "o pertenece a otro usuario."
+            )
+        }), 409
+
+    return jsonify({
+        "mensaje": "Compra confirmada correctamente.",
+        "boleto": serializar_boleto(documento),
+    })
 
 @app.errorhandler(ValueError)
 def manejar_valor_invalido(error):
